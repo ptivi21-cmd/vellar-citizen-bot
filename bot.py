@@ -1,11 +1,7 @@
-import os
-import json
 from pathlib import Path
 from datetime import datetime
 
-from PIL import Image, ImageDraw, ImageFont
-
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice
+from telegram import Update
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -16,198 +12,180 @@ from telegram.ext import (
     filters,
 )
 
-TOKEN = os.environ["BOT_TOKEN"]
+from PIL import Image, ImageDraw, ImageFont
 
-PRICE_STARS = 500
 
-DATA_FILE = Path("citizens.json")
+BOT_TOKEN = __import__("os").getenv("BOT_TOKEN")
+
 CARD_TEMPLATE = Path("citizen_card_template.png")
 
 
-def load_data():
-    if DATA_FILE.exists():
-        try:
-            return json.loads(
-                DATA_FILE.read_text(encoding="utf-8")
-            )
-        except Exception:
-            pass
-
-    return {
-        "next_id": 2,
-        "citizens": []
-    }
-
-
-def save_data(data):
-    DATA_FILE.write_text(
-        json.dumps(
-            data,
-            ensure_ascii=False,
-            indent=2
-        ),
-        encoding="utf-8"
-    )
-
-
-data = load_data()
-
+# =========================
+# СОЗДАНИЕ КАРТОЧКИ
+# =========================
 
 def create_citizen_card(citizen_id, name, date):
     image = Image.open(CARD_TEMPLATE).convert("RGB")
     draw = ImageDraw.Draw(image)
 
-    font_regular = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
-    font_bold = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+    font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 
-    id_font = ImageFont.truetype(font_regular, 48)
-    name_font = ImageFont.truetype(font_regular, 34)
-    date_font = ImageFont.truetype(font_regular, 32)
+    try:
+        font_id = ImageFont.truetype(font_path, 32)
+        font_name = ImageFont.truetype(font_path, 32)
+        font_date = ImageFont.truetype(font_path, 28)
+    except:
+        font_id = ImageFont.load_default()
+        font_name = ImageFont.load_default()
+        font_date = ImageFont.load_default()
 
-    # Citizen number
+    # Номер гражданина
     draw.text(
         (100, 468),
-        citizen_id,
-        font=id_font,
-        fill=(235, 235, 235)
+        str(citizen_id),
+        font=font_id,
+        fill=(230, 230, 230)
     )
 
-    # Name
+    # Имя
     draw.text(
         (100, 620),
-        name.upper(),
-        font=name_font,
-        fill=(235, 235, 235)
+        str(name),
+        font=font_name,
+        fill=(230, 230, 230)
     )
 
-    # Date
+    # Дата
     draw.text(
         (785, 620),
-        date,
-        font=date_font,
-        fill=(235, 235, 235)
+        str(date),
+        font=font_date,
+        fill=(230, 230, 230)
     )
 
-    output = Path(f"citizen_{citizen_id.replace('#', '')}.png")
+    output_path = Path(f"citizen_{str(citizen_id).replace('#', '')}.png")
+    image.save(output_path)
 
-    image.save(
-        output,
-        format="PNG",
-        optimize=True
-    )
+    return output_path
 
-    return output
 
+# =========================
+# START
+# =========================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    keyboard = [
-        [
-            InlineKeyboardButton(
-                "🇻🇪 BECOME A CITIZEN",
-                callback_data="citizenship"
-            )
-        ]
-    ]
+    text = (
+        "🇻🇪 REPUBLIC OF VELLAR\n\n"
+        "Welcome to Vellar.\n\n"
+        "Become a digital citizen and receive your official "
+        "Vellar Citizen ID Card.\n\n"
+        "This is a digital membership in the Vellar community."
+    )
 
     await update.message.reply_text(
-        "🇻🇪 REPUBLIC OF VELLAR\n\n"
-        "A digital nation built by its citizens.\n\n"
-        "Become a Founder Citizen of Vellar.",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        text,
+        reply_markup={
+            "inline_keyboard": [
+                [
+                    {
+                        "text": "🇻🇪 BECOME A CITIZEN",
+                        "callback_data": "citizenship"
+                    }
+                ]
+            ]
+        }
     )
 
+
+# =========================
+# ГРАЖДАНСТВО
+# =========================
 
 async def citizenship(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
     query = update.callback_query
     await query.answer()
 
-    keyboard = [
-        [
-            InlineKeyboardButton(
-                "⭐ BECOME A CITIZEN — 500 ⭐",
-                callback_data="buy"
-            )
-        ]
-    ]
-
-    await query.edit_message_text(
+    await query.message.reply_text(
         "🇻🇪 FOUNDER CITIZENSHIP\n\n"
-        "Become one of the founding citizens of the Republic of Vellar.\n\n"
         "Status: Founder Citizen\n"
-        "Price: 500 ⭐",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        "Digital Citizen ID Card included\n"
+        "Permanent digital membership\n\n"
+        "Price: ⭐ 500 Telegram Stars",
+        reply_markup={
+            "inline_keyboard": [
+                [
+                    {
+                        "text": "⭐ BUY FOR 500 STARS",
+                        "callback_data": "buy"
+                    }
+                ]
+            ]
+        }
     )
 
 
-async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# =========================
+# ОПЛАТА
+# =========================
 
+async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
-    prices = [
-        LabeledPrice(
-            "Founder Citizenship",
-            PRICE_STARS
-        )
-    ]
 
     await context.bot.send_invoice(
         chat_id=query.message.chat_id,
-        title="Republic of Vellar — Founder Citizenship",
+        title="Vellar Founder Citizenship",
         description="Digital membership in the Republic of Vellar.",
         payload="vellar_founder_citizenship",
         currency="XTR",
-        prices=prices,
+        prices=[],
         provider_token=""
     )
 
 
-async def precheckout(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+# =========================
+# PRE-CHECKOUT
+# =========================
 
+async def precheckout(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.pre_checkout_query
 
-    if query.invoice_payload != "vellar_founder_citizenship":
-
+    if query.invoice_payload == "vellar_founder_citizenship":
+        await query.answer(ok=True)
+    else:
         await query.answer(
             ok=False,
             error_message="Invalid payment."
         )
 
-        return
 
-    await query.answer(ok=True)
+# =========================
+# УСПЕШНАЯ ОПЛАТА
+# =========================
 
-
-async def successful_payment(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    global data
-
+async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     payment = update.message.successful_payment
+    user = update.effective_user
 
-    if payment.invoice_payload != "vellar_founder_citizenship":
-        return
+    file_path = Path("citizens.json")
+
+    if file_path.exists():
+        import json
+
+        with open(file_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    else:
+        data = {
+            "next_id": 2,
+            "citizens": []
+        }
 
     citizen_number = data["next_id"]
+    citizen_id = f"#{citizen_number:04d}"
 
     data["next_id"] += 1
 
-    user = update.effective_user
-
-    citizen_id = f"#{citizen_number:04d}"
-
-    name = user.first_name or "Citizen"
-
-    if user.last_name:
-        name += f" {user.last_name}"
-
+    name = user.full_name
     date = datetime.now().strftime("%d.%m.%Y")
 
     citizen = {
@@ -216,99 +194,116 @@ async def successful_payment(
         "username": user.username,
         "name": name,
         "status": "Founder Citizen",
+        "country": "Vellar",
         "date": date,
-        "stars": PRICE_STARS,
+        "stars": 500,
         "payment_id": payment.telegram_payment_charge_id
     }
 
     data["citizens"].append(citizen)
 
-    save_data(data)
+    import json
 
-    # Create personalized card
-    card = create_citizen_card(
+    with open(file_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+    # Создаём персональную карточку
+    card_path = create_citizen_card(
         citizen_id,
         name,
         date
     )
 
-    # Send card
-    with open(card, "rb") as photo:
-
+    # Отправляем карточку
+    with open(card_path, "rb") as photo:
         await update.message.reply_photo(
             photo=photo,
             caption=(
-                "🇻🇪 REPUBLIC OF VELLAR\n\n"
+                "🇻🇪 WELCOME TO THE REPUBLIC OF VELLAR\n\n"
                 f"Citizen ID: {citizen_id}\n"
-                f"Name: {name}\n"
-                "Status: Founder Citizen\n"
-                f"Joined: {date}\n\n"
-                "Welcome to Vellar."
+                "Status: Founder Citizen\n\n"
+                "Your digital citizen card is attached."
             )
         )
 
 
-async def terms(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+# =========================
+# TEST CARD
+# =========================
 
+async def testcard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+
+    date = datetime.now().strftime("%d.%m.%Y")
+
+    card_path = create_citizen_card(
+        "#TEST",
+        user.full_name,
+        date
+    )
+
+    with open(card_path, "rb") as photo:
+        await update.message.reply_photo(
+            photo=photo,
+            caption=(
+                "🪪 TEST CITIZEN CARD\n\n"
+                "This is a preview only."
+            )
+        )
+
+
+# =========================
+# TERMS
+# =========================
+
+async def terms(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "VELLAR TERMS\n\n"
-        "Vellar is a fictional digital nation and community.\n\n"
+        "Vellar is a fictional digital community.\n\n"
         "Vellar citizenship is a digital membership/status "
         "and does not constitute legal citizenship, nationality, "
         "residency, land ownership or government-issued status."
     )
 
 
-async def support(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+# =========================
+# SUPPORT
+# =========================
 
+async def support(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "VELLAR SUPPORT\n\n"
-        "For payment or citizenship issues, "
-        "contact the Vellar administration."
+        "Vellar Support\n\n"
+        "For questions about your digital membership, "
+        "please contact the Vellar administration."
     )
 
+
+# =========================
+# MAIN
+# =========================
 
 def main():
+    application = Application.builder().token(BOT_TOKEN).build()
 
-    app = Application.builder().token(TOKEN).build()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("terms", terms))
+    application.add_handler(CommandHandler("support", support))
 
-    app.add_handler(
-        CommandHandler("start", start)
+    # ТЕСТОВАЯ КОМАНДА
+    application.add_handler(CommandHandler("testcard", testcard))
+
+    application.add_handler(
+        CallbackQueryHandler(citizenship, pattern="^citizenship$")
     )
 
-    app.add_handler(
-        CommandHandler("terms", terms)
+    application.add_handler(
+        CallbackQueryHandler(buy, pattern="^buy$")
     )
 
-    app.add_handler(
-        CommandHandler("support", support)
-    )
-
-    app.add_handler(
-        CallbackQueryHandler(
-            citizenship,
-            pattern="^citizenship$"
-        )
-    )
-
-    app.add_handler(
-        CallbackQueryHandler(
-            buy,
-            pattern="^buy$"
-        )
-    )
-
-    app.add_handler(
+    application.add_handler(
         PreCheckoutQueryHandler(precheckout)
     )
 
-    app.add_handler(
+    application.add_handler(
         MessageHandler(
             filters.SUCCESSFUL_PAYMENT,
             successful_payment
@@ -317,7 +312,7 @@ def main():
 
     print("Vellar bot is running...")
 
-    app.run_polling()
+    application.run_polling()
 
 
 if __name__ == "__main__":
