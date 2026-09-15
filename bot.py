@@ -123,4 +123,4 @@ app.add_handler(
 
 print("Vellar bot is running...")
 app.run_polling()
-if name == "main": main()
+if name == "main": main() 
