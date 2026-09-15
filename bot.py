@@ -41,7 +41,6 @@ def get_font(size):
     ]
 
     for path in font_paths:
-
         if Path(path).exists():
             return ImageFont.truetype(path, size)
 
@@ -49,7 +48,7 @@ def get_font(size):
 
 
 # ============================================================
-# БОЛЬШОЙ ТЕКСТ С АВТОМАТИЧЕСКИМ СЖАТИЕМ ПО ШИРИНЕ
+# БОЛЬШОЙ ТЕКСТ
 # ============================================================
 
 def draw_big_text(
@@ -64,13 +63,11 @@ def draw_big_text(
 
     font = get_font(font_size)
 
-    # Временное изображение для текста
     bbox = font.getbbox(text)
 
     text_width = bbox[2] - bbox[0]
     text_height = bbox[3] - bbox[1]
 
-    # Добавляем запас
     padding = 20
 
     temp_width = text_width + padding * 2
@@ -85,24 +82,28 @@ def draw_big_text(
     text_draw = ImageDraw.Draw(text_image)
 
     text_draw.text(
-        (padding - bbox[0], padding - bbox[1]),
+        (
+            padding - bbox[0],
+            padding - bbox[1]
+        ),
         text,
         font=font,
         fill=color
     )
 
-    # Если текст шире поля —
-    # сжимаем только по горизонтали.
+    # Если текст шире области —
+    # сжимаем только ПО ШИРИНЕ.
+    # Высота букв остаётся большой.
     if temp_width > max_width:
 
-        new_width = max_width
-
         text_image = text_image.resize(
-            (new_width, temp_height),
+            (
+                max_width,
+                temp_height
+            ),
             Image.Resampling.LANCZOS
         )
 
-    # Накладываем на карточку
     image.paste(
         text_image,
         (x, y),
@@ -126,79 +127,47 @@ def create_citizen_card(
 
 
     # ========================================================
-    # ЦВЕТ ТЕКСТА
-    # ========================================================
-
-    text_color = (
-        235,
-        235,
-        235
-    )
-
-
-    # ========================================================
-    # CITIZEN NUMBER
+    # НОМЕР
     # ========================================================
 
     draw_big_text(
-
         image=image,
-
         text=citizen_id,
-
         x=100,
-
-        y=455,
-
-        max_width=300,
-
-        font_size=125,
-
-        color=text_color
+        y=450,
+        max_width=500,
+        font_size=312,
+        color=(235, 235, 235)
     )
 
 
     # ========================================================
-    # NAME
+    # ИМЯ
     # ========================================================
 
     draw_big_text(
-
         image=image,
-
         text=name,
-
         x=100,
-
-        y=600,
-
-        max_width=320,
-
-        font_size=120,
-
-        color=text_color
+        y=595,
+        max_width=600,
+        font_size=300,
+        color=(235, 235, 235)
     )
 
 
     # ========================================================
-    # ESTABLISHED / DATE
+    # ДАТА
     # ========================================================
 
     draw_big_text(
-
         image=image,
-
         text=date,
-
         x=785,
-
-        y=600,
-
-        max_width=300,
-
-        font_size=105,
-
-        color=text_color
+        y=595,
+        max_width=500,
+        font_size=262,
+        color=(235, 235, 235)
     )
 
 
@@ -276,13 +245,10 @@ async def citizenship(
     ]
 
     await query.message.reply_text(
-
         "🇻🇪 FOUNDER CITIZENSHIP\n\n"
-
         "Status: Founder Citizen\n"
         "Digital Citizen ID Card included\n"
         "Permanent digital membership\n\n"
-
         "Price: ⭐ 500 Telegram Stars",
 
         reply_markup=InlineKeyboardMarkup(
@@ -305,22 +271,15 @@ async def buy(
     await query.answer()
 
     await context.bot.send_invoice(
-
         chat_id=query.message.chat_id,
-
         title="Vellar Founder Citizenship",
-
         description=(
             "Digital membership in the "
             "Republic of Vellar."
         ),
-
         payload="vellar_founder_citizenship",
-
         currency="XTR",
-
         prices=[],
-
         provider_token=""
     )
 
@@ -336,10 +295,7 @@ async def precheckout(
 
     query = update.pre_checkout_query
 
-    if (
-        query.invoice_payload
-        == "vellar_founder_citizenship"
-    ):
+    if query.invoice_payload == "vellar_founder_citizenship":
 
         await query.answer(
             ok=True
@@ -348,12 +304,8 @@ async def precheckout(
     else:
 
         await query.answer(
-
             ok=False,
-
-            error_message=(
-                "Invalid payment."
-            )
+            error_message="Invalid payment."
         )
 
 
@@ -477,12 +429,10 @@ async def successful_payment(
     # КАРТОЧКА
     # --------------------------------------------------------
 
-    card_path = (
-        create_citizen_card(
-            citizen_id,
-            name,
-            date
-        )
+    card_path = create_citizen_card(
+        citizen_id,
+        name,
+        date
     )
 
 
@@ -496,27 +446,20 @@ async def successful_payment(
     ) as photo:
 
         await update.message.reply_photo(
-
             photo=photo,
-
             caption=(
-
                 "🇻🇪 WELCOME TO "
                 "THE REPUBLIC OF VELLAR\n\n"
-
-                f"Citizen ID: "
-                f"{citizen_id}\n"
-
+                f"Citizen ID: {citizen_id}\n"
                 "Status: Founder Citizen\n\n"
-
-                "Your Digital Citizen ID "
-                "Card is attached."
+                "Your Digital Citizen ID Card "
+                "is attached."
             )
         )
 
 
 # ============================================================
-# ТЕСТОВАЯ КАРТОЧКА
+# TEST CARD
 # ============================================================
 
 async def testcard(
@@ -533,12 +476,10 @@ async def testcard(
     )
 
 
-    card_path = (
-        create_citizen_card(
-            "#TEST",
-            name,
-            date
-        )
+    card_path = create_citizen_card(
+        "#TEST",
+        name,
+        date
     )
 
 
@@ -548,16 +489,10 @@ async def testcard(
     ) as photo:
 
         await update.message.reply_photo(
-
             photo=photo,
-
             caption=(
-
-                "🪪 VELLAR "
-                "DIGITAL CITIZEN ID\n\n"
-
-                "TEST CARD — "
-                "PREVIEW ONLY"
+                "🪪 VELLAR DIGITAL CITIZEN ID\n\n"
+                "TEST CARD — PREVIEW ONLY"
             )
         )
 
@@ -572,16 +507,10 @@ async def terms(
 ):
 
     await update.message.reply_text(
-
-        "Vellar is a fictional "
-        "digital community.\n\n"
-
-        "Vellar citizenship is a "
-        "digital membership/status "
-        "and does not constitute legal "
-        "citizenship, nationality, "
-        "residency, land ownership "
-        "or government-issued status."
+        "Vellar is a fictional digital community.\n\n"
+        "Vellar citizenship is a digital membership/status "
+        "and does not constitute legal citizenship, nationality, "
+        "residency, land ownership or government-issued status."
     )
 
 
@@ -595,12 +524,9 @@ async def support(
 ):
 
     await update.message.reply_text(
-
         "Vellar Support\n\n"
-
-        "For questions about your "
-        "digital membership, please "
-        "contact the Vellar administration."
+        "For questions about your digital membership, "
+        "please contact the Vellar administration."
     )
 
 
@@ -689,10 +615,6 @@ def main():
 
     application.run_polling()
 
-
-# ============================================================
-# RUN
-# ============================================================
 
 if __name__ == "__main__":
 
