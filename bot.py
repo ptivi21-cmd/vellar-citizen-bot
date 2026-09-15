@@ -85,22 +85,22 @@ def create_citizen_card(citizen_id, name, date):
     id_font = fit_font(
         citizen_id,
         ID_WIDTH,
-        52,
-        28
+        90,
+        40
     )
 
     name_font = fit_font(
         name,
         NAME_WIDTH,
-        48,
-        22
+        80,
+        32
     )
 
     date_font = fit_font(
         date,
         DATE_WIDTH,
-        38,
-        22
+        80,
+        32
     )
 
     # ==================================
