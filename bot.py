@@ -22,7 +22,6 @@ from PIL import Image, ImageDraw, ImageFont
 
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-
 CARD_TEMPLATE = Path("citizen_card_template.png")
 
 
@@ -31,16 +30,11 @@ CARD_TEMPLATE = Path("citizen_card_template.png")
 # ============================================================
 
 def get_font(size):
-    """
-    Используем крупный serif-шрифт,
-    чтобы он визуально подходил к VELLAR.
-    """
-
     font_paths = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf",
-        "/usr/share/fonts/truetype/liberation2/LiberationSerif-Regular.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
         "/usr/share/fonts/truetype/liberation2/LiberationSerif-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSerif-Regular.ttf",
     ]
 
     for path in font_paths:
@@ -51,10 +45,10 @@ def get_font(size):
 
 
 # ============================================================
-# АВТОМАТИЧЕСКИЙ ПОДБОР РАЗМЕРА
+# ПОДБОР РАЗМЕРА ШРИФТА
 # ============================================================
 
-def fit_font(text, max_width, start_size, min_size=38):
+def fit_font(text, max_width, start_size, min_size):
 
     size = start_size
 
@@ -81,51 +75,44 @@ def fit_font(text, max_width, start_size, min_size=38):
 def create_citizen_card(citizen_id, name, date):
 
     image = Image.open(CARD_TEMPLATE).convert("RGB")
-
     draw = ImageDraw.Draw(image)
 
-
     # ========================================================
-    # ПОЛЯ КАРТОЧКИ
+    # ОБЛАСТИ ДЛЯ ДИНАМИЧЕСКОГО ТЕКСТА
     # ========================================================
 
-    # CITIZEN NUMBER
+    # Citizen Number
     ID_X = 100
-    ID_Y = 458
+    ID_Y = 455
     ID_WIDTH = 285
 
-
-    # NAME
+    # Name
     NAME_X = 100
-    NAME_Y = 605
+    NAME_Y = 600
     NAME_WIDTH = 310
 
-
-    # ESTABLISHED / DATE
+    # Established / Date
     DATE_X = 785
-    DATE_Y = 605
+    DATE_Y = 600
     DATE_WIDTH = 300
 
-
     # ========================================================
-    # КРУПНЫЕ ШРИФТЫ
+    # РАЗМЕРЫ ШРИФТОВ
     # ========================================================
 
     id_font = fit_font(
         citizen_id,
         ID_WIDTH,
-        78,
-        42
+        92,
+        45
     )
-
 
     name_font = fit_font(
         name,
         NAME_WIDTH,
-        76,
+        82,
         38
     )
-
 
     date_font = fit_font(
         date,
@@ -134,16 +121,14 @@ def create_citizen_card(citizen_id, name, date):
         38
     )
 
-
     # ========================================================
     # ЦВЕТ
     # ========================================================
 
     text_color = (235, 235, 235)
 
-
     # ========================================================
-    # НОМЕР ГРАЖДАНИНА
+    # НОМЕР
     # ========================================================
 
     draw.text(
@@ -152,7 +137,6 @@ def create_citizen_card(citizen_id, name, date):
         font=id_font,
         fill=text_color
     )
-
 
     # ========================================================
     # ИМЯ
@@ -165,7 +149,6 @@ def create_citizen_card(citizen_id, name, date):
         fill=text_color
     )
 
-
     # ========================================================
     # ДАТА
     # ========================================================
@@ -177,14 +160,11 @@ def create_citizen_card(citizen_id, name, date):
         fill=text_color
     )
 
-
     # ========================================================
     # СОХРАНЕНИЕ
     # ========================================================
 
-    filename = (
-        f"citizen_{str(citizen_id).replace('#', '')}.png"
-    )
+    filename = f"citizen_{citizen_id.replace('#', '')}.png"
 
     output_path = Path(filename)
 
@@ -197,10 +177,7 @@ def create_citizen_card(citizen_id, name, date):
 # START
 # ============================================================
 
-async def start(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = (
         "🇻🇪 REPUBLIC OF VELLAR\n\n"
@@ -228,13 +205,9 @@ async def start(
 # CITIZENSHIP
 # ============================================================
 
-async def citizenship(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def citizenship(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     query = update.callback_query
-
     await query.answer()
 
     keyboard = [
@@ -261,13 +234,9 @@ async def citizenship(
 # BUY
 # ============================================================
 
-async def buy(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     query = update.callback_query
-
     await query.answer()
 
     await context.bot.send_invoice(
@@ -282,13 +251,10 @@ async def buy(
 
 
 # ============================================================
-# PRE-CHECKOUT
+# PRECHECKOUT
 # ============================================================
 
-async def precheckout(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def precheckout(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     query = update.pre_checkout_query
 
@@ -314,11 +280,9 @@ async def successful_payment(
 ):
 
     payment = update.message.successful_payment
-
     user = update.effective_user
 
     file_path = Path("citizens.json")
-
 
     # --------------------------------------------------------
     # ЗАГРУЖАЕМ РЕЕСТР
@@ -341,9 +305,8 @@ async def successful_payment(
             "citizens": []
         }
 
-
     # --------------------------------------------------------
-    # НОВЫЙ ID
+    # СОЗДАЁМ ID
     # --------------------------------------------------------
 
     citizen_number = data["next_id"]
@@ -352,44 +315,30 @@ async def successful_payment(
 
     data["next_id"] += 1
 
-
     # --------------------------------------------------------
-    # ДАННЫЕ
+    # ДАННЫЕ ГРАЖДАНИНА
     # --------------------------------------------------------
 
     name = user.full_name
 
     date = datetime.now().strftime("%d.%m.%Y")
 
-
     citizen = {
-
         "id": citizen_id,
-
         "telegram_id": user.id,
-
         "username": user.username,
-
         "name": name,
-
         "status": "Founder Citizen",
-
         "country": "Vellar",
-
         "date": date,
-
         "stars": 500,
-
-        "payment_id":
-            payment.telegram_payment_charge_id
+        "payment_id": payment.telegram_payment_charge_id
     }
-
 
     data["citizens"].append(citizen)
 
-
     # --------------------------------------------------------
-    # СОХРАНЯЕМ
+    # СОХРАНЯЕМ РЕЕСТР
     # --------------------------------------------------------
 
     with open(
@@ -405,7 +354,6 @@ async def successful_payment(
             indent=2
         )
 
-
     # --------------------------------------------------------
     # СОЗДАЁМ КАРТОЧКУ
     # --------------------------------------------------------
@@ -416,9 +364,8 @@ async def successful_payment(
         date
     )
 
-
     # --------------------------------------------------------
-    # ОТПРАВЛЯЕМ
+    # ОТПРАВЛЯЕМ КАРТОЧКУ
     # --------------------------------------------------------
 
     with open(
@@ -427,9 +374,7 @@ async def successful_payment(
     ) as photo:
 
         await update.message.reply_photo(
-
             photo=photo,
-
             caption=(
                 "🇻🇪 WELCOME TO THE REPUBLIC OF VELLAR\n\n"
                 f"Citizen ID: {citizen_id}\n"
@@ -454,13 +399,11 @@ async def testcard(
 
     date = datetime.now().strftime("%d.%m.%Y")
 
-
     card_path = create_citizen_card(
         "#TEST",
         name,
         date
     )
-
 
     with open(
         card_path,
@@ -468,9 +411,7 @@ async def testcard(
     ) as photo:
 
         await update.message.reply_photo(
-
             photo=photo,
-
             caption=(
                 "🪪 VELLAR DIGITAL CITIZEN ID\n\n"
                 "TEST CARD — PREVIEW ONLY"
@@ -488,9 +429,7 @@ async def terms(
 ):
 
     await update.message.reply_text(
-
         "Vellar is a fictional digital community.\n\n"
-
         "Vellar citizenship is a digital membership/status "
         "and does not constitute legal citizenship, nationality, "
         "residency, land ownership or government-issued status."
@@ -507,9 +446,7 @@ async def support(
 ):
 
     await update.message.reply_text(
-
         "Vellar Support\n\n"
-
         "For questions about your digital membership, "
         "please contact the Vellar administration."
     )
@@ -528,7 +465,6 @@ def main():
         .build()
     )
 
-
     # COMMANDS
 
     application.add_handler(
@@ -543,14 +479,11 @@ def main():
         CommandHandler("support", support)
     )
 
-    # ТЕСТ КАРТОЧКИ
-
     application.add_handler(
         CommandHandler("testcard", testcard)
     )
 
-
-    # КНОПКИ
+    # BUTTONS
 
     application.add_handler(
         CallbackQueryHandler(
@@ -566,7 +499,6 @@ def main():
         )
     )
 
-
     # PAYMENT
 
     application.add_handler(
@@ -580,16 +512,10 @@ def main():
         )
     )
 
-
     print("Vellar bot is running...")
-
 
     application.run_polling()
 
-
-# ============================================================
-# START BOT
-# ============================================================
 
 if __name__ == "__main__":
     main()
