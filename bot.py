@@ -314,44 +314,51 @@ def get_font(size):
     return ImageFont.load_default()
 
 
-def draw_big_text(image, text, x, y, max_width, font_size, color=(235, 235, 235)):
-    text = str(text)
-    font = get_font(font_size)
-    bbox = font.getbbox(text)
+def draw_big_text(
+    base_image,
+    text,
+    center_x,
+    center_y,
+    font_path,
+    font_size,
+    max_width=None,
+    fill=(255, 255, 255),
+):
+    """
+    Draw text centered at (center_x, center_y).
 
+    The requested font_size is treated as the starting/max size.
+    If max_width is provided, the font is reduced only as much as
+    necessary to fit. The rendered text is never resized afterwards,
+    so increasing font_size actually makes the text larger.
+    """
+    font_size = int(font_size)
+    min_font_size = 20
+
+    while font_size > min_font_size:
+        font = ImageFont.truetype(font_path, font_size)
+        bbox = font.getbbox(str(text))
+        text_width = bbox[2] - bbox[0]
+        if max_width is None or text_width <= max_width:
+            break
+        font_size -= 2
+
+    font = ImageFont.truetype(font_path, max(font_size, min_font_size))
+
+    bbox = font.getbbox(str(text))
     text_width = bbox[2] - bbox[0]
     text_height = bbox[3] - bbox[1]
 
-    padding = 20
-    temp_width = max(1, text_width + padding * 2)
-    temp_height = max(1, text_height + padding * 2)
-
-    text_image = Image.new(
-        "RGBA",
-        (temp_width, temp_height),
-        (0, 0, 0, 0),
-    )
-
-    text_draw = ImageDraw.Draw(text_image)
-    text_draw.text(
+    draw = ImageDraw.Draw(base_image)
+    draw.text(
         (
-            padding - bbox[0],
-            padding - bbox[1],
+            center_x - text_width / 2 - bbox[0],
+            center_y - text_height / 2 - bbox[1],
         ),
-        text,
+        str(text),
         font=font,
-        fill=color,
+        fill=fill,
     )
-
-    if temp_width > max_width:
-        text_image = text_image.resize(
-            (max_width, temp_height),
-            Image.Resampling.LANCZOS,
-        )
-
-    image.paste(text_image, (x, y), text_image)
-
-
 def create_citizen_card(citizen_id, username, date, suffix="", telegram_user_id=None):
     if not CARD_TEMPLATE.exists():
         raise FileNotFoundError(
@@ -367,7 +374,7 @@ def create_citizen_card(citizen_id, username, date, suffix="", telegram_user_id=
         x=100,
         y=450,
         max_width=500,
-        font_size=312,
+        font_size=420,
     )
 
     # Username instead of the old full-name field.
@@ -382,7 +389,7 @@ def create_citizen_card(citizen_id, username, date, suffix="", telegram_user_id=
         x=100,
         y=595,
         max_width=600,
-        font_size=180,
+        font_size=300,
     )
 
     draw_big_text(
@@ -391,7 +398,7 @@ def create_citizen_card(citizen_id, username, date, suffix="", telegram_user_id=
         x=785,
         y=595,
         max_width=500,
-        font_size=262,
+        font_size=360,
     )
 
     filename = (
