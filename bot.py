@@ -6,25 +6,25 @@ import time
 
 from telegram import (
     Update,
-    InlineKeyboardMarkup,
     InlineKeyboardButton,
-    LabeledPrice,
+    InlineKeyboardMarkup,
 )
 from telegram.ext import (
     Application,
     CommandHandler,
     CallbackQueryHandler,
+    ContextTypes,
     PreCheckoutQueryHandler,
     MessageHandler,
-    ContextTypes,
     filters,
 )
+
 from PIL import Image, ImageDraw, ImageFont
 
 
-# ============================================================
+# =========================================================
 # CONFIG
-# ============================================================
+# =========================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "888972823"))
@@ -33,283 +33,256 @@ CARD_TEMPLATE = Path("citizen_card_template.png")
 DB_PATH = Path("vellar.db")
 
 CITIZENSHIP_PRICE = 500
+
 LAND_PACKAGES = {
-    "land_1": {"hectares": 1, "price": 200, "title": "1 hectare"},
-    "land_2": {"hectares": 2, "price": 300, "title": "2 hectares"},
-    "land_4": {"hectares": 4, "price": 580, "title": "4 hectares"},
+    1: 200,
+    2: 300,
+    4: 580,
 }
 
 VEL_PER_HECTARE_PER_HOUR = 1.5
 
 
-# ============================================================
+# =========================================================
 # DATABASE
-# ============================================================
+# =========================================================
 
-def db():
-    connection = sqlite3.connect(DB_PATH)
-    connection.row_factory = sqlite3.Row
-    return connection
+def get_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 
 def init_db():
-    with db() as conn:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS users (
-                telegram_id INTEGER PRIMARY KEY,
-                username TEXT,
-                full_name TEXT,
-                citizen_id TEXT UNIQUE,
-                citizen_date TEXT,
-                hectares REAL NOT NULL DEFAULT 0,
-                vel_balance REAL NOT NULL DEFAULT 0,
-                last_accrual REAL NOT NULL,
-                citizenship_payment_id TEXT UNIQUE
-            )
-            """
-        )
+    conn = get_db()
+    cur = conn.cursor()
 
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS payments (
-                payment_id TEXT PRIMARY KEY,
-                telegram_id INTEGER NOT NULL,
-                payload TEXT NOT NULL,
-                amount INTEGER NOT NULL,
-                created_at REAL NOT NULL
-            )
-            """
-        )
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            telegram_id INTEGER PRIMARY KEY,
+            username TEXT,
+            full_name TEXT,
 
-        # Helps if the bot is upgraded from an earlier version.
-        columns = {
-            row["name"]
-            for row in conn.execute("PRAGMA table_info(users)").fetchall()
-        }
-        if "last_accrual" not in columns:
-            conn.execute(
-                "ALTER TABLE users ADD COLUMN last_accrual REAL NOT NULL DEFAULT 0"
-            )
+            citizen_id TEXT UNIQUE,
+            citizen_date TEXT,
+
+            hectares REAL NOT NULL DEFAULT 0,
+            vel_balance REAL NOT NULL DEFAULT 0,
+            last_accrual REAL NOT NULL DEFAULT 0,
+
+            citizenship_payment_id TEXT UNIQUE,
+
+            test_citizen_id TEXT,
+            test_citizen_date TEXT,
+            test_hectares REAL NOT NULL DEFAULT 0,
+            test_vel_balance REAL NOT NULL DEFAULT 0,
+            test_last_accrual REAL NOT NULL DEFAULT 0
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS payments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            telegram_id INTEGER,
+            payment_id TEXT UNIQUE,
+            payment_type TEXT,
+            amount INTEGER,
+            created_at TEXT
+        )
+    """)
+
+    # -----------------------------------------------------
+    # MIGRATION FOR OLD DATABASE
+    # -----------------------------------------------------
+
+    cur.execute("PRAGMA table_info(users)")
+    columns = {row["name"] for row in cur.fetchall()}
+
+    migrations = {
+        "test_citizen_id": "ALTER TABLE users ADD COLUMN test_citizen_id TEXT",
+        "test_citizen_date": "ALTER TABLE users ADD COLUMN test_citizen_date TEXT",
+        "test_hectares": "ALTER TABLE users ADD COLUMN test_hectares REAL NOT NULL DEFAULT 0",
+        "test_vel_balance": "ALTER TABLE users ADD COLUMN test_vel_balance REAL NOT NULL DEFAULT 0",
+        "test_last_accrual": "ALTER TABLE users ADD COLUMN test_last_accrual REAL NOT NULL DEFAULT 0",
+    }
+
+    for column, sql in migrations.items():
+        if column not in columns:
+            cur.execute(sql)
+
+    conn.commit()
+    conn.close()
+
+
+# =========================================================
+# HELPERS
+# =========================================================
+
+def now_str():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
 def get_user(telegram_id):
-    with db() as conn:
-        return conn.execute(
-            "SELECT * FROM users WHERE telegram_id = ?",
-            (telegram_id,),
-        ).fetchone()
+    conn = get_db()
+    cur = conn.cursor()
+
+    cur.execute(
+        "SELECT * FROM users WHERE telegram_id = ?",
+        (telegram_id,)
+    )
+
+    user = cur.fetchone()
+    conn.close()
+
+    return user
 
 
-def ensure_user(tg_user):
-    now = time.time()
-    with db() as conn:
-        existing = conn.execute(
-            "SELECT telegram_id FROM users WHERE telegram_id = ?",
-            (tg_user.id,),
-        ).fetchone()
+def ensure_user(telegram_user):
+    conn = get_db()
+    cur = conn.cursor()
 
-        if existing:
-            conn.execute(
-                """
-                UPDATE users
-                SET username = ?, full_name = ?
-                WHERE telegram_id = ?
-                """,
-                (
-                    tg_user.username,
-                    tg_user.full_name,
-                    tg_user.id,
-                ),
-            )
-        else:
-            conn.execute(
-                """
-                INSERT INTO users (
-                    telegram_id,
-                    username,
-                    full_name,
-                    last_accrual
-                )
-                VALUES (?, ?, ?, ?)
-                """,
-                (
-                    tg_user.id,
-                    tg_user.username,
-                    tg_user.full_name,
-                    now,
-                ),
-            )
-
-
-def settle_vel(telegram_id):
-    """
-    Converts elapsed time into VEL and stores it in vel_balance.
-    Yield = 1.5 VEL per hectare per hour.
-    """
-    now = time.time()
-
-    with db() as conn:
-        user = conn.execute(
-            "SELECT hectares, vel_balance, last_accrual FROM users WHERE telegram_id = ?",
-            (telegram_id,),
-        ).fetchone()
-
-        if not user:
-            return 0.0, 0.0
-
-        elapsed = max(0.0, now - float(user["last_accrual"]))
-        rate_per_hour = float(user["hectares"]) * VEL_PER_HECTARE_PER_HOUR
-        earned = elapsed / 3600.0 * rate_per_hour
-
-        new_balance = float(user["vel_balance"]) + earned
-
-        conn.execute(
-            """
-            UPDATE users
-            SET vel_balance = ?, last_accrual = ?
-            WHERE telegram_id = ?
-            """,
-            (new_balance, now, telegram_id),
+    cur.execute("""
+        INSERT INTO users (
+            telegram_id,
+            username,
+            full_name,
+            last_accrual,
+            test_last_accrual
         )
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(telegram_id)
+        DO UPDATE SET
+            username = excluded.username,
+            full_name = excluded.full_name
+    """, (
+        telegram_user.id,
+        telegram_user.username,
+        telegram_user.full_name,
+        time.time(),
+        time.time(),
+    ))
 
-        return earned, new_balance
-
-
-def next_citizen_number():
-    with db() as conn:
-        row = conn.execute(
-            """
-            SELECT citizen_id
-            FROM users
-            WHERE citizen_id IS NOT NULL
-            ORDER BY rowid DESC
-            LIMIT 1
-            """
-        ).fetchone()
-
-    if not row or not row["citizen_id"]:
-        return 0
-
-    try:
-        return int(row["citizen_id"].replace("#", ""))
-    except ValueError:
-        return 0
+    conn.commit()
+    conn.close()
 
 
-def create_citizen(telegram_user, payment_id=None, test=False):
+# =========================================================
+# CITIZENSHIP
+# =========================================================
+
+def get_next_citizen_id():
+    conn = get_db()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT citizen_id
+        FROM users
+        WHERE citizen_id IS NOT NULL
+    """)
+
+    rows = cur.fetchall()
+    conn.close()
+
+    max_id = 0
+
+    for row in rows:
+        try:
+            value = str(row["citizen_id"]).replace("#", "")
+            number = int(value)
+
+            if number > max_id:
+                max_id = number
+
+        except (ValueError, TypeError):
+            pass
+
+    return f"#{max_id + 1:04d}"
+
+
+def create_citizen(telegram_user, payment_id=None):
     ensure_user(telegram_user)
 
-    existing = get_user(telegram_user.id)
+    conn = get_db()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT citizen_id
+        FROM users
+        WHERE telegram_id = ?
+    """, (telegram_user.id,))
+
+    existing = cur.fetchone()
+
     if existing and existing["citizen_id"]:
-        return existing["citizen_id"], False
+        conn.close()
+        return existing["citizen_id"]
 
-    if test:
-        citizen_id = "#TEST"
-        date = datetime.now().strftime("%d.%m.%Y")
-    else:
-        number = next_citizen_number() + 1
-        citizen_id = f"#{number:04d}"
-        date = datetime.now().strftime("%d.%m.%Y")
+    citizen_id = get_next_citizen_id()
+    date = now_str()
 
-    with db() as conn:
-        conn.execute(
-            """
-            UPDATE users
-            SET citizen_id = ?,
-                citizen_date = ?,
-                citizenship_payment_id = ?
-            WHERE telegram_id = ?
-            """,
-            (
-                citizen_id,
-                date,
-                payment_id,
-                telegram_user.id,
-            ),
-        )
+    cur.execute("""
+        UPDATE users
+        SET
+            citizen_id = ?,
+            citizen_date = ?,
+            citizenship_payment_id = ?
+        WHERE telegram_id = ?
+    """, (
+        citizen_id,
+        date,
+        payment_id,
+        telegram_user.id,
+    ))
 
-    return citizen_id, True
+    conn.commit()
+    conn.close()
+
+    return citizen_id
 
 
-def add_land(telegram_id, hectares, payment_id=None):
-    ensure_user_id(telegram_id)
+def create_test_citizenship(telegram_user):
+    ensure_user(telegram_user)
 
-    with db() as conn:
-        conn.execute(
-            """
-            UPDATE users
-            SET hectares = hectares + ?
-            WHERE telegram_id = ?
-            """,
-            (hectares, telegram_id),
-        )
+    conn = get_db()
+    cur = conn.cursor()
 
+    test_id = "#TEST"
+    date = now_str()
 
-def ensure_user_id(telegram_id):
-    if get_user(telegram_id) is None:
-        now = time.time()
-        with db() as conn:
-            conn.execute(
-                """
-                INSERT OR IGNORE INTO users (
-                    telegram_id,
-                    username,
-                    full_name,
-                    last_accrual
-                )
-                VALUES (?, ?, ?, ?)
-                """,
-                (telegram_id, None, None, now),
-            )
+    cur.execute("""
+        UPDATE users
+        SET
+            test_citizen_id = ?,
+            test_citizen_date = ?
+        WHERE telegram_id = ?
+    """, (
+        test_id,
+        date,
+        telegram_user.id,
+    ))
+
+    conn.commit()
+    conn.close()
+
+    return test_id
 
 
-def payment_exists(payment_id):
-    with db() as conn:
-        return conn.execute(
-            "SELECT 1 FROM payments WHERE payment_id = ?",
-            (payment_id,),
-        ).fetchone() is not None
+# =========================================================
+# CITIZEN CARD
+# =========================================================
 
-
-def save_payment(payment_id, telegram_id, payload, amount):
-    with db() as conn:
-        conn.execute(
-            """
-            INSERT OR IGNORE INTO payments (
-                payment_id,
-                telegram_id,
-                payload,
-                amount,
-                created_at
-            )
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (
-                payment_id,
-                telegram_id,
-                payload,
-                amount,
-                time.time(),
-            ),
-        )
-
-
-# ============================================================
-# CARD GENERATION
-# ============================================================
-
-def get_font(size):
-    font_paths = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
-        "/usr/share/fonts/truetype/liberation2/LiberationSerif-Bold.ttf",
-        "/usr/share/fonts/truetype/liberation2/LiberationSerif-Regular.ttf",
+def load_font(size):
+    font_candidates = [
+        "DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
     ]
 
-    for path in font_paths:
-        if Path(path).exists():
+    for path in font_candidates:
+        try:
             return ImageFont.truetype(path, size)
+        except Exception:
+            pass
 
     return ImageFont.load_default()
 
@@ -319,805 +292,904 @@ def draw_big_text(
     text,
     center_x,
     center_y,
-    font_path,
     font_size,
     max_width=None,
-    fill=(255, 255, 255),
+    fill=(255, 255, 255)
 ):
-    """
-    Draw text centered at (center_x, center_y).
-
-    The requested font_size is treated as the starting/max size.
-    If max_width is provided, the font is reduced only as much as
-    necessary to fit. The rendered text is never resized afterwards,
-    so increasing font_size actually makes the text larger.
-    """
-    font_size = int(font_size)
-    min_font_size = 20
-
-    while font_size > min_font_size:
-        font = ImageFont.truetype(font_path, font_size)
-        bbox = font.getbbox(str(text))
-        text_width = bbox[2] - bbox[0]
-        if max_width is None or text_width <= max_width:
-            break
-        font_size -= 2
-
-    font = ImageFont.truetype(font_path, max(font_size, min_font_size))
-
-    bbox = font.getbbox(str(text))
-    text_width = bbox[2] - bbox[0]
-    text_height = bbox[3] - bbox[1]
-
     draw = ImageDraw.Draw(base_image)
+
+    size = font_size
+
+    while size > 10:
+        font = load_font(size)
+
+        bbox = draw.textbbox((0, 0), str(text), font=font)
+
+        width = bbox[2] - bbox[0]
+        height = bbox[3] - bbox[1]
+
+        if max_width is None or width <= max_width:
+            break
+
+        size -= 5
+
+    x = center_x - width / 2
+    y = center_y - height / 2
+
     draw.text(
-        (
-            center_x - text_width / 2 - bbox[0],
-            center_y - text_height / 2 - bbox[1],
-        ),
+        (x, y),
         str(text),
         font=font,
         fill=fill,
     )
-def create_citizen_card(citizen_id, username, date, suffix="", telegram_user_id=None):
+
+
+def create_citizen_card(
+    citizen_id,
+    username,
+    date,
+    suffix="",
+    telegram_user_id=None
+):
     if not CARD_TEMPLATE.exists():
         raise FileNotFoundError(
-            "citizen_card_template.png not found in the project."
+            "Файл citizen_card_template.png не найден."
         )
 
     image = Image.open(CARD_TEMPLATE).convert("RGB")
 
-    # These coordinates match the current Vellar card template.
     draw_big_text(
-        image=image,
+        base_image=image,
         text=citizen_id,
-        x=100,
-        y=450,
-        max_width=500,
-        font_size=420,
+        center_x=350,
+        center_y=450,
+        max_width=600,
+        font_size=180,
     )
 
-    # Username instead of the old full-name field.
     display_username = (
-        f"@{username}" if username
+        f"@{username}"
+        if username
         else f"ID {telegram_user_id}"
     )
 
     draw_big_text(
-        image=image,
+        base_image=image,
         text=display_username,
-        x=100,
-        y=595,
+        center_x=350,
+        center_y=600,
         max_width=600,
-        font_size=300,
+        font_size=100,
     )
 
     draw_big_text(
-        image=image,
+        base_image=image,
         text=date,
-        x=785,
-        y=595,
+        center_x=800,
+        center_y=600,
         max_width=500,
-        font_size=360,
+        font_size=90,
     )
 
     filename = (
-        f"citizen_{str(citizen_id).replace('#', '')}"
+        f"citizen_"
+        f"{str(citizen_id).replace('#', '')}"
         f"{suffix}.png"
     )
 
     output_path = Path(filename)
-    image.save(output_path, quality=95)
+
+    image.save(
+        output_path,
+        quality=95,
+    )
+
     return output_path
 
 
-# ============================================================
+# =========================================================
+# VEL ACCRUAL
+# =========================================================
+
+def update_vel_balance(telegram_id):
+    conn = get_db()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT hectares, vel_balance, last_accrual
+        FROM users
+        WHERE telegram_id = ?
+    """, (telegram_id,))
+
+    user = cur.fetchone()
+
+    if not user:
+        conn.close()
+        return
+
+    current_time = time.time()
+    last_accrual = user["last_accrual"] or current_time
+
+    hours_passed = (
+        current_time - last_accrual
+    ) / 3600
+
+    if hours_passed <= 0:
+        conn.close()
+        return
+
+    earned = (
+        user["hectares"]
+        * VEL_PER_HECTARE_PER_HOUR
+        * hours_passed
+    )
+
+    new_balance = user["vel_balance"] + earned
+
+    cur.execute("""
+        UPDATE users
+        SET
+            vel_balance = ?,
+            last_accrual = ?
+        WHERE telegram_id = ?
+    """, (
+        new_balance,
+        current_time,
+        telegram_id,
+    ))
+
+    conn.commit()
+    conn.close()
+
+
+def update_test_vel_balance(telegram_id):
+    conn = get_db()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT
+            test_hectares,
+            test_vel_balance,
+            test_last_accrual
+        FROM users
+        WHERE telegram_id = ?
+    """, (telegram_id,))
+
+    user = cur.fetchone()
+
+    if not user:
+        conn.close()
+        return
+
+    current_time = time.time()
+
+    last_accrual = (
+        user["test_last_accrual"]
+        or current_time
+    )
+
+    hours_passed = (
+        current_time - last_accrual
+    ) / 3600
+
+    if hours_passed <= 0:
+        conn.close()
+        return
+
+    earned = (
+        user["test_hectares"]
+        * VEL_PER_HECTARE_PER_HOUR
+        * hours_passed
+    )
+
+    new_balance = user["test_vel_balance"] + earned
+
+    cur.execute("""
+        UPDATE users
+        SET
+            test_vel_balance = ?,
+            test_last_accrual = ?
+        WHERE telegram_id = ?
+    """, (
+        new_balance,
+        current_time,
+        telegram_id,
+    ))
+
+    conn.commit()
+    conn.close()
+
+
+# =========================================================
 # KEYBOARDS
-# ============================================================
+# =========================================================
 
-def main_keyboard(user):
-    citizen = get_user(user.id)
+def main_keyboard(user=None):
+    buttons = []
 
-    buttons = [
+    if user and user["citizen_id"]:
+        buttons.append([
+            InlineKeyboardButton(
+                "🪪 Моё гражданство",
+                callback_data="citizenship"
+            )
+        ])
+    else:
+        buttons.append([
+            InlineKeyboardButton(
+                "🪪 Стать гражданином",
+                callback_data="citizenship"
+            )
+        ])
+
+    buttons.extend([
         [
             InlineKeyboardButton(
-                "🇻🇪 Гражданство — ⭐ 500",
-                callback_data="citizenship",
+                "🗺 Цифровая территория",
+                callback_data="land"
             )
         ],
         [
             InlineKeyboardButton(
-                "🌍 Земельные участки",
-                callback_data="land",
-            ),
-            InlineKeyboardButton(
-                "📊 Мои активы",
-                callback_data="assets",
-            ),
+                "💎 Мои активы",
+                callback_data="assets"
+            )
         ],
         [
             InlineKeyboardButton(
-                "ℹ️ Как работает Vellar",
-                callback_data="terms",
+                "📜 Условия",
+                callback_data="terms"
             ),
             InlineKeyboardButton(
                 "🆘 Поддержка",
-                callback_data="support",
+                callback_data="support"
             ),
         ],
-    ]
-
-    if citizen and citizen["citizen_id"]:
-        buttons[0][0] = InlineKeyboardButton(
-            "🪪 Моё гражданство",
-            callback_data="citizenship",
-        )
+    ])
 
     return InlineKeyboardMarkup(buttons)
 
 
-def citizenship_keyboard():
-    return InlineKeyboardMarkup(
+def test_keyboard():
+    return InlineKeyboardMarkup([
         [
-            [
-                InlineKeyboardButton(
-                    "⭐ Купить гражданство — 500",
-                    callback_data="buy_citizenship",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "◀️ Главное меню",
-                    callback_data="menu",
-                )
-            ],
-        ]
-    )
-
-
-def land_keyboard(locked=False):
-    if locked:
-        return InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton(
-                        "🇻🇪 Получить гражданство",
-                        callback_data="citizenship",
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        "◀️ Главное меню",
-                        callback_data="menu",
-                    )
-                ],
-            ]
-        )
-
-    return InlineKeyboardMarkup(
+            InlineKeyboardButton(
+                "🪪 TEST гражданство",
+                callback_data="test_citizenship"
+            )
+        ],
         [
-            [
-                InlineKeyboardButton(
-                    "🌱 1 гектар — ⭐ 200",
-                    callback_data="buy_land_1",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "🌱 2 гектара — ⭐ 300",
-                    callback_data="buy_land_2",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "🌱 4 гектара — ⭐ 580",
-                    callback_data="buy_land_4",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "📊 Мои активы",
-                    callback_data="assets",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "◀️ Главное меню",
-                    callback_data="menu",
-                )
-            ],
-        ]
-    )
-
-
-def assets_keyboard():
-    return InlineKeyboardMarkup(
+            InlineKeyboardButton(
+                "➕ TEST +1 га",
+                callback_data="test_land_1"
+            ),
+            InlineKeyboardButton(
+                "➕ TEST +2 га",
+                callback_data="test_land_2"
+            ),
+        ],
         [
-            [
-                InlineKeyboardButton(
-                    "🔄 Обновить",
-                    callback_data="assets",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "🌍 Купить участок",
-                    callback_data="land",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "◀️ Главное меню",
-                    callback_data="menu",
-                )
-            ],
-        ]
-    )
+            InlineKeyboardButton(
+                "➕ TEST +4 га",
+                callback_data="test_land_4"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "💎 TEST активы",
+                callback_data="test_assets"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "♻️ TEST сброс",
+                callback_data="test_reset"
+            )
+        ],
+    ])
 
 
-# ============================================================
-# TEXT
-# ============================================================
+# =========================================================
+# TEXTS
+# =========================================================
 
-def citizenship_text(user):
-    citizen = get_user(user.id)
-
-    if citizen and citizen["citizen_id"]:
+def start_text(user):
+    if user and user["citizen_id"]:
         return (
-            "🇻🇪 ВЫ ГРАЖДАНИН VELLAR\n\n"
-            f"Citizen ID: {citizen['citizen_id']}\n"
-            "Status: Founder Citizen\n"
-            f"Date: {citizen['citizen_date']}\n\n"
-            "Гражданство уже оформлено."
+            "🏛 <b>Добро пожаловать в Vellar.</b>\n\n"
+            f"Ваш статус: <b>Citizen</b>\n"
+            f"Ваш ID: <b>{user['citizen_id']}</b>\n\n"
+            "Управляйте своим цифровым статусом, "
+            "территорией и активами."
         )
 
     return (
-        "🇻🇪 ГРАЖДАНСТВО VELLAR\n\n"
-        "Цифровое гражданство Республики Vellar.\n\n"
-        "После оплаты вы получите:\n"
-        "• уникальный Citizen ID\n"
-        "• цифровую Citizen Card\n"
-        "• доступ к покупке земельных участков\n"
-        "• доступ к системе VEL\n\n"
-        "Цена: ⭐ 500 Telegram Stars"
+        "🏛 <b>Добро пожаловать в Vellar.</b>\n\n"
+        "Vellar — цифровая республика, "
+        "в которой гражданство, территория "
+        "и внутренние активы существуют "
+        "в единой системе.\n\n"
+        "Первый шаг — получить гражданство."
+    )
+
+
+def citizenship_text(user):
+    if user and user["citizen_id"]:
+        return (
+            "🪪 <b>Ваше гражданство Vellar</b>\n\n"
+            f"ID: <b>{user['citizen_id']}</b>\n"
+            f"Дата: <b>{user['citizen_date']}</b>\n\n"
+            "Статус: <b>Citizen</b>"
+        )
+
+    return (
+        "🪪 <b>Гражданство Vellar</b>\n\n"
+        "Станьте одним из первых граждан "
+        "цифровой республики.\n\n"
+        f"Стоимость: <b>{CITIZENSHIP_PRICE} ⭐</b>"
     )
 
 
 def land_text(user):
-    citizen = get_user(user.id)
-
-    if not citizen or not citizen["citizen_id"]:
+    if not user or not user["citizen_id"]:
         return (
-            "🔒 ЗЕМЕЛЬНЫЕ УЧАСТКИ\n\n"
-            "Покупка земельных участков доступна "
-            "только гражданам Vellar.\n\n"
-            "Сначала получите гражданство."
+            "🗺 <b>Цифровая территория</b>\n\n"
+            "Для приобретения территории "
+            "необходимо сначала получить гражданство."
         )
 
+    hectares = user["hectares"]
+
     return (
-        "🌍 ЗЕМЕЛЬНЫЕ УЧАСТКИ VELLAR\n\n"
-        "Каждый гектар генерирует 1.5 VEL в час.\n\n"
-        "Доступные пакеты:\n"
-        "🌱 1 гектар — ⭐ 200\n"
-        "🌱 2 гектара — ⭐ 300\n"
-        "🌱 4 гектара — ⭐ 580\n\n"
-        "Покупка добавляет выбранную площадь "
-        "к вашим активам."
+        "🗺 <b>Цифровая территория Vellar</b>\n\n"
+        f"Ваша территория: <b>{hectares:g} га</b>\n\n"
+        "Выберите пакет:"
     )
 
 
 def assets_text(user):
-    citizen = get_user(user.id)
-
-    if not citizen or not citizen["citizen_id"]:
+    if not user or not user["citizen_id"]:
         return (
-            "📊 МОИ АКТИВЫ\n\n"
-            "У вас пока нет активов Vellar.\n\n"
-            "Получите гражданство, чтобы открыть "
-            "доступ к земельным участкам."
+            "💎 <b>Активы Vellar</b>\n\n"
+            "Раздел доступен гражданам Vellar."
         )
 
-    settle_vel(user.id)
-    citizen = get_user(user.id)
-
-    hectares = float(citizen["hectares"])
-    balance = float(citizen["vel_balance"])
-    rate = hectares * VEL_PER_HECTARE_PER_HOUR
-
     return (
-        "📊 МОИ АКТИВЫ\n\n"
-        f"🪪 Citizen ID: {citizen['citizen_id']}\n"
-        f"🌱 Земля: {hectares:g} га\n"
-        f"⚡ Скорость добычи: {rate:g} VEL/час\n"
-        f"💎 Баланс VEL: {balance:.4f}\n\n"
-        "Доход начисляется автоматически "
-        "с момента покупки каждого участка."
+        "💎 <b>Мои активы</b>\n\n"
+        f"🪪 Citizenship: <b>{user['citizen_id']}</b>\n"
+        f"🗺 Territory: <b>{user['hectares']:g} га</b>\n"
+        f"💎 VEL: <b>{user['vel_balance']:.2f}</b>"
     )
 
 
-# ============================================================
+# =========================================================
 # START
-# ============================================================
+# =========================================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    ensure_user(update.effective_user)
+    telegram_user = update.effective_user
+
+    ensure_user(telegram_user)
+
+    user = get_user(telegram_user.id)
 
     await update.message.reply_text(
-        "🇻🇪 REPUBLIC OF VELLAR\n\n"
-        "Добро пожаловать в Vellar.\n\n"
-        "Цифровое гражданство, территория и "
-        "внутренняя экономика VEL.",
-        reply_markup=main_keyboard(update.effective_user),
+        start_text(user),
+        parse_mode="HTML",
+        reply_markup=main_keyboard(user),
     )
 
 
-# ============================================================
+# =========================================================
+# TEST COMMAND
+# =========================================================
+
+async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+
+    await update.message.reply_text(
+        "🧪 <b>TEST MODE</b>\n\n"
+        "Тестовые данные полностью отделены "
+        "от реальных данных пользователя.\n\n"
+        "Сброс теста НЕ удаляет настоящее гражданство.",
+        parse_mode="HTML",
+        reply_markup=test_keyboard(),
+    )
+
+
+# =========================================================
 # CALLBACKS
-# ============================================================
+# =========================================================
 
 async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    user = update.effective_user
-    ensure_user(user)
+    telegram_user = query.from_user
+    ensure_user(telegram_user)
 
+    user = get_user(telegram_user.id)
     data = query.data
-
-    if data == "menu":
-        await query.edit_message_text(
-            "🇻🇪 REPUBLIC OF VELLAR\n\n"
-            "Выберите действие:",
-            reply_markup=main_keyboard(user),
-        )
-        return
 
     if data == "citizenship":
         await query.edit_message_text(
             citizenship_text(user),
-            reply_markup=citizenship_keyboard(),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "⭐ Получить гражданство",
+                        callback_data="buy_citizenship"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "⬅️ Назад",
+                        callback_data="menu"
+                    )
+                ],
+            ]) if not user["citizen_id"] else
+            InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "⬅️ Назад",
+                        callback_data="menu"
+                    )
+                ]
+            ])
         )
-        return
 
-    if data == "land":
-        citizen = get_user(user.id)
-
-        if not citizen or not citizen["citizen_id"]:
-            await query.edit_message_text(
-                land_text(user),
-                reply_markup=land_keyboard(locked=True),
-            )
-            return
-
+    elif data == "land":
         await query.edit_message_text(
             land_text(user),
-            reply_markup=land_keyboard(),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "1 га — 200 ⭐",
+                        callback_data="buy_land_1"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "2 га — 300 ⭐",
+                        callback_data="buy_land_2"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "4 га — 580 ⭐",
+                        callback_data="buy_land_4"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "⬅️ Назад",
+                        callback_data="menu"
+                    )
+                ],
+            ]) if user["citizen_id"] else
+            InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "⬅️ Назад",
+                        callback_data="menu"
+                    )
+                ]
+            ])
         )
-        return
 
-    if data == "assets":
+    elif data == "assets":
+        update_vel_balance(telegram_user.id)
+
+        user = get_user(telegram_user.id)
+
         await query.edit_message_text(
             assets_text(user),
-            reply_markup=assets_keyboard(),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "⬅️ Назад",
+                        callback_data="menu"
+                    )
+                ]
+            ])
         )
-        return
 
-    if data == "terms":
+    elif data == "terms":
         await query.edit_message_text(
-            "ℹ️ КАК РАБОТАЕТ VELLAR\n\n"
-            "1. Получите цифровое гражданство.\n"
-            "2. После этого откроется покупка земли.\n"
-            "3. Каждый гектар генерирует 1.5 VEL/час.\n"
-            "4. В разделе «Мои активы» отображаются "
-            "земля, скорость добычи и накопленный VEL.\n\n"
-            "Vellar — цифровое сообщество. Это не "
-            "юридическое гражданство, государственная "
-            "регистрация или право собственности на "
-            "реальную недвижимость.",
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("◀️ Главное меню", callback_data="menu")]]
-            ),
+            "📜 <b>Условия Vellar</b>\n\n"
+            "Vellar является цифровым проектом. "
+            "Гражданство и территория существуют "
+            "внутри экосистемы Vellar.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "⬅️ Назад",
+                        callback_data="menu"
+                    )
+                ]
+            ])
         )
-        return
 
-    if data == "support":
+    elif data == "support":
         await query.edit_message_text(
-            "🆘 VELLAR SUPPORT\n\n"
-            "По вопросам цифрового гражданства, "
-            "активов и платежей обратитесь к администрации Vellar.",
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("◀️ Главное меню", callback_data="menu")]]
-            ),
+            "🆘 <b>Поддержка</b>\n\n"
+            "По вопросам работы Vellar "
+            "обратитесь к администратору.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "⬅️ Назад",
+                        callback_data="menu"
+                    )
+                ]
+            ])
+        )
+
+    elif data == "menu":
+        user = get_user(telegram_user.id)
+
+        await query.edit_message_text(
+            start_text(user),
+            parse_mode="HTML",
+            reply_markup=main_keyboard(user),
+        )
+
+
+# =========================================================
+# BUY CITIZENSHIP
+# =========================================================
+
+async def buy_citizenship(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    user = get_user(query.from_user.id)
+
+    if user and user["citizen_id"]:
+        await query.edit_message_text(
+            "У вас уже есть гражданство Vellar.",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "⬅️ Назад",
+                        callback_data="menu"
+                    )
+                ]
+            ])
         )
         return
 
-    if data == "buy_citizenship":
-        citizen = get_user(user.id)
-
-        if citizen and citizen["citizen_id"]:
-            await query.edit_message_text(
-                citizenship_text(user),
-                reply_markup=citizenship_keyboard(),
-            )
-            return
-
-        await send_invoice(
-            context,
-            chat_id=query.message.chat_id,
-            title="Vellar Citizenship",
-            description="Digital citizenship in the Republic of Vellar.",
-            payload="citizenship",
-            price=CITIZENSHIP_PRICE,
-        )
-        return
-
-    if data.startswith("buy_land_"):
-        citizen = get_user(user.id)
-
-        if not citizen or not citizen["citizen_id"]:
-            await query.edit_message_text(
-                land_text(user),
-                reply_markup=land_keyboard(locked=True),
-            )
-            return
-
-        package_key = data.replace("buy_", "")
-        package = LAND_PACKAGES.get(package_key)
-
-        if not package:
-            await query.message.reply_text("Ошибка пакета земли.")
-            return
-
-        await send_invoice(
-            context,
-            chat_id=query.message.chat_id,
-            title=f"Vellar Land: {package['title']}",
-            description=(
-                f"{package['hectares']} hectare(s) of digital Vellar territory."
-            ),
-            payload=package_key,
-            price=package["price"],
-        )
-        return
-
-
-# ============================================================
-# INVOICES / TELEGRAM STARS
-# ============================================================
-
-async def send_invoice(context, chat_id, title, description, payload, price):
     await context.bot.send_invoice(
-        chat_id=chat_id,
-        title=title,
-        description=description,
-        payload=payload,
+        chat_id=query.from_user.id,
+        title="Vellar Citizenship",
+        description="Гражданство цифровой республики Vellar",
+        payload="citizenship",
         currency="XTR",
-        prices=[LabeledPrice(title, price)],
-        provider_token="",
+        prices=[],
     )
 
 
-async def precheckout(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.pre_checkout_query
+# =========================================================
+# BUY LAND
+# =========================================================
 
-    valid_payloads = {"citizenship", *LAND_PACKAGES.keys()}
+async def buy_land(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
 
-    if query.invoice_payload not in valid_payloads:
-        await query.answer(
-            ok=False,
-            error_message="Invalid Vellar payment.",
+    user = get_user(query.from_user.id)
+
+    if not user or not user["citizen_id"]:
+        await query.edit_message_text(
+            "Сначала необходимо получить гражданство Vellar."
         )
         return
+
+    hectares = int(query.data.split("_")[-1])
+    price = LAND_PACKAGES[hectares]
+
+    await context.bot.send_invoice(
+        chat_id=query.from_user.id,
+        title=f"Vellar Territory — {hectares} га",
+        description=f"Цифровая территория Vellar: {hectares} га",
+        payload=f"land_{hectares}",
+        currency="XTR",
+        prices=[],
+    )
+
+
+# =========================================================
+# PRECHECKOUT
+# =========================================================
+
+async def precheckout_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    query = update.pre_checkout_query
 
     await query.answer(ok=True)
 
 
-async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# =========================================================
+# SUCCESSFUL PAYMENT
+# =========================================================
+
+async def successful_payment(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
     payment = update.message.successful_payment
-    user = update.effective_user
+    telegram_user = update.effective_user
 
-    ensure_user(user)
-
-    payment_id = payment.telegram_payment_charge_id
     payload = payment.invoice_payload
+    payment_id = payment.telegram_payment_charge_id
 
-    if payment_exists(payment_id):
-        return
+    ensure_user(telegram_user)
 
-    save_payment(
-        payment_id=payment_id,
-        telegram_id=user.id,
-        payload=payload,
-        amount=payment.total_amount,
-    )
+    conn = get_db()
+    cur = conn.cursor()
+
+    try:
+        cur.execute("""
+            INSERT INTO payments (
+                telegram_id,
+                payment_id,
+                payment_type,
+                amount,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?)
+        """, (
+            telegram_user.id,
+            payment_id,
+            payload,
+            payment.total_amount,
+            datetime.now(timezone.utc).isoformat(),
+        ))
+    except sqlite3.IntegrityError:
+        pass
+
+    conn.commit()
+    conn.close()
 
     if payload == "citizenship":
-        citizen_id, created = create_citizen(
-            user,
+        citizen_id = create_citizen(
+            telegram_user,
             payment_id=payment_id,
-            test=False,
         )
 
-        if not created:
+        user = get_user(telegram_user.id)
+
+        try:
+            card_path = create_citizen_card(
+                citizen_id=citizen_id,
+                username=telegram_user.username,
+                date=user["citizen_date"],
+                telegram_user_id=telegram_user.id,
+            )
+
+            with open(card_path, "rb") as photo:
+                await update.message.reply_photo(
+                    photo=photo,
+                    caption=(
+                        "🏛 <b>Гражданство Vellar оформлено.</b>\n\n"
+                        f"Ваш ID: <b>{citizen_id}</b>\n"
+                        "Статус: <b>Citizen</b>"
+                    ),
+                    parse_mode="HTML",
+                )
+
+        except Exception:
             await update.message.reply_text(
-                "Гражданство уже оформлено ранее.",
-                reply_markup=main_keyboard(user),
-            )
-            return
-
-        date = get_user(user.id)["citizen_date"]
-        username = user.username
-
-        card_path = create_citizen_card(
-            citizen_id,
-            username,
-            date,
-            telegram_user_id=user.id,
-        )
-
-        with open(card_path, "rb") as photo:
-            await update.message.reply_photo(
-                photo=photo,
-                caption=(
-                    "🇻🇪 ДОБРО ПОЖАЛОВАТЬ В VELLAR\n\n"
-                    f"Citizen ID: {citizen_id}\n"
-                    "Status: Founder Citizen\n"
-                    f"Date: {date}\n\n"
-                    "Ваша цифровая Citizen Card готова."
-                ),
+                "🏛 <b>Гражданство Vellar оформлено.</b>\n\n"
+                f"Ваш ID: <b>{citizen_id}</b>",
+                parse_mode="HTML",
             )
 
-        await update.message.reply_text(
-            "Открыты земельные активы Vellar.",
-            reply_markup=main_keyboard(user),
-        )
-        return
+    elif payload.startswith("land_"):
+        hectares = int(payload.split("_")[1])
 
-    if payload in LAND_PACKAGES:
-        package = LAND_PACKAGES[payload]
+        conn = get_db()
+        cur = conn.cursor()
 
-        # Accrue income up to the exact moment of purchase,
-        # then add the new land. New hectares start earning now.
-        settle_vel(user.id)
-        add_land(
-            telegram_id=user.id,
-            hectares=package["hectares"],
-            payment_id=payment_id,
-        )
+        cur.execute("""
+            UPDATE users
+            SET hectares = hectares + ?
+            WHERE telegram_id = ?
+        """, (
+            hectares,
+            telegram_user.id,
+        ))
 
-        citizen = get_user(user.id)
+        conn.commit()
+        conn.close()
 
         await update.message.reply_text(
-            "✅ ЗЕМЕЛЬНЫЙ АКТИВ ПРИОБРЕТЁН\n\n"
-            f"Добавлено: {package['hectares']} га\n"
-            f"Оплата: ⭐ {package['price']}\n"
-            f"Всего земли: {float(citizen['hectares']):g} га\n"
-            f"Новая скорость: "
-            f"{float(citizen['hectares']) * VEL_PER_HECTARE_PER_HOUR:g} VEL/час",
-            reply_markup=main_keyboard(user),
+            "🗺 <b>Территория добавлена.</b>\n\n"
+            f"Получено: <b>{hectares} га</b>",
+            parse_mode="HTML",
         )
 
 
-# ============================================================
-# TEST MODE
-# ============================================================
+# =========================================================
+# TEST CALLBACKS
+# =========================================================
 
-def is_admin(user_id):
-    return ADMIN_ID != 0 and user_id == ADMIN_ID
-
-
-async def test_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("Команда доступна только ADMIN_ID.")
-        return
-
-    keyboard = InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton(
-                    "🧪 TEST: гражданство",
-                    callback_data="test_citizenship",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "🧪 TEST: +1 га",
-                    callback_data="test_land_1",
-                ),
-                InlineKeyboardButton(
-                    "🧪 TEST: +2 га",
-                    callback_data="test_land_2",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    "🧪 TEST: +4 га",
-                    callback_data="test_land_4",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "🧪 TEST: активы",
-                    callback_data="test_assets",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "🧹 TEST: сбросить аккаунт",
-                    callback_data="test_reset",
-                )
-            ],
-        ]
-    )
-
-    await update.message.reply_text(
-        "🧪 VELLAR DEVELOPER TEST MENU\n\n"
-        "Тестовые кнопки не списывают Telegram Stars.",
-        reply_markup=keyboard,
-    )
-
-
-async def test_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def test_callbacks(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
     query = update.callback_query
-
-    if not is_admin(update.effective_user.id):
-        await query.answer("Только для ADMIN_ID.", show_alert=True)
-        return
-
     await query.answer()
-    user = update.effective_user
 
-    if query.data == "test_citizenship":
-        citizen_id, created = create_citizen(
-            user,
-            payment_id=None,
-            test=True,
-        )
+    telegram_user = query.from_user
 
-        date = get_user(user.id)["citizen_date"]
-
-        card_path = create_citizen_card(
-            citizen_id,
-            user.username,
-            date,
-            suffix="_test",
-            telegram_user_id=user.id,
-        )
-
-        with open(card_path, "rb") as photo:
-            await query.message.reply_photo(
-                photo=photo,
-                caption=(
-                    "🧪 TEST CITIZENSHIP\n\n"
-                    f"Citizen ID: {citizen_id}\n"
-                    f"Username: @{user.username if user.username else 'none'}\n"
-                    f"Date: {date}\n\n"
-                    "Telegram Stars НЕ списаны."
-                ),
-            )
+    if telegram_user.id != ADMIN_ID:
         return
 
-    if query.data.startswith("test_land_"):
-        citizen = get_user(user.id)
+    ensure_user(telegram_user)
 
-        if not citizen or not citizen["citizen_id"]:
+    data = query.data
+
+    # -----------------------------------------------------
+    # TEST CITIZENSHIP
+    # -----------------------------------------------------
+
+    if data == "test_citizenship":
+
+        test_id = create_test_citizenship(
+            telegram_user
+        )
+
+        user = get_user(telegram_user.id)
+
+        try:
+            card_path = create_citizen_card(
+                citizen_id=test_id,
+                username=telegram_user.username,
+                date=user["test_citizen_date"],
+                suffix="_test",
+                telegram_user_id=telegram_user.id,
+            )
+
+            with open(card_path, "rb") as photo:
+                await query.message.reply_photo(
+                    photo=photo,
+                    caption=(
+                        "🧪 <b>TEST гражданство</b>\n\n"
+                        "Это тестовая версия.\n"
+                        "Реальное гражданство не изменено."
+                    ),
+                    parse_mode="HTML",
+                )
+
+        except Exception as e:
             await query.message.reply_text(
-                "Сначала нажмите TEST: гражданство."
+                f"Ошибка создания тестовой карты:\n{e}"
             )
-            return
 
-        hectares = int(query.data.replace("test_land_", ""))
-        settle_vel(user.id)
-        add_land(user.id, hectares)
+    # -----------------------------------------------------
+    # TEST LAND
+    # -----------------------------------------------------
 
-        citizen = get_user(user.id)
+    elif data.startswith("test_land_"):
+
+        hectares = int(data.split("_")[-1])
+
+        conn = get_db()
+        cur = conn.cursor()
+
+        cur.execute("""
+            UPDATE users
+            SET
+                test_hectares = test_hectares + ?,
+                test_last_accrual = ?
+            WHERE telegram_id = ?
+        """, (
+            hectares,
+            time.time(),
+            telegram_user.id,
+        ))
+
+        conn.commit()
+        conn.close()
+
+        user = get_user(telegram_user.id)
 
         await query.message.reply_text(
-            "🧪 TEST LAND PURCHASE\n\n"
-            f"Добавлено: {hectares} га\n"
-            f"Всего: {float(citizen['hectares']):g} га\n"
-            f"Скорость: "
-            f"{float(citizen['hectares']) * VEL_PER_HECTARE_PER_HOUR:g} VEL/час"
+            "🧪 <b>TEST территория добавлена.</b>\n\n"
+            f"Добавлено: <b>{hectares} га</b>\n"
+            f"Всего TEST: <b>{user['test_hectares']:g} га</b>\n\n"
+            "Реальная территория не изменена.",
+            parse_mode="HTML",
         )
-        return
 
-    if query.data == "test_assets":
-        if not get_user(user.id) or not get_user(user.id)["citizen_id"]:
-            await query.message.reply_text(
-                "Сначала нажмите TEST: гражданство."
-            )
-            return
+    # -----------------------------------------------------
+    # TEST ASSETS
+    # -----------------------------------------------------
+
+    elif data == "test_assets":
+
+        update_test_vel_balance(
+            telegram_user.id
+        )
+
+        user = get_user(telegram_user.id)
 
         await query.message.reply_text(
-            "🧪 TEST ASSETS\n\n" + assets_text(user)
+            "🧪 <b>TEST АКТИВЫ</b>\n\n"
+            f"🪪 Citizenship: "
+            f"<b>{user['test_citizen_id'] or '—'}</b>\n"
+            f"🗺 Territory: "
+            f"<b>{user['test_hectares']:g} га</b>\n"
+            f"💎 VEL: "
+            f"<b>{user['test_vel_balance']:.2f}</b>\n\n"
+            "Реальные активы пользователя "
+            "не изменены.",
+            parse_mode="HTML",
         )
-        return
 
-    if query.data == "test_reset":
-        with db() as conn:
-            conn.execute(
-                "DELETE FROM payments WHERE telegram_id = ?",
-                (user.id,),
-            )
-            conn.execute(
-                "DELETE FROM users WHERE telegram_id = ?",
-                (user.id,),
-            )
+    # -----------------------------------------------------
+    # TEST RESET
+    # -----------------------------------------------------
+
+    elif data == "test_reset":
+
+        conn = get_db()
+        cur = conn.cursor()
+
+        cur.execute("""
+            UPDATE users
+            SET
+                test_citizen_id = NULL,
+                test_citizen_date = NULL,
+                test_hectares = 0,
+                test_vel_balance = 0,
+                test_last_accrual = ?
+            WHERE telegram_id = ?
+        """, (
+            time.time(),
+            telegram_user.id,
+        ))
+
+        conn.commit()
+        conn.close()
 
         await query.message.reply_text(
-            "🧹 Тестовый аккаунт сброшен."
+            "♻️ <b>TEST данные сброшены.</b>\n\n"
+            "Реальное гражданство, территория, "
+            "VEL и история платежей НЕ затронуты.",
+            parse_mode="HTML",
         )
-        return
 
 
-# ============================================================
-# EXTRA COMMANDS
-# ============================================================
+# =========================================================
+# ERROR HANDLER
+# =========================================================
 
-async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        f"Ваш Telegram ID: {update.effective_user.id}\n\n"
-        "Используйте этот ID как ADMIN_ID в настройках деплоя."
-    )
-
-
-async def assets_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    ensure_user(update.effective_user)
-
-    await update.message.reply_text(
-        assets_text(update.effective_user),
-        reply_markup=assets_keyboard(),
-    )
+async def error_handler(
+    update: object,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    print("ERROR:", context.error)
 
 
-async def land_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    ensure_user(update.effective_user)
-    citizen = get_user(update.effective_user.id)
-
-    await update.message.reply_text(
-        land_text(update.effective_user),
-        reply_markup=land_keyboard(
-            locked=not citizen or not citizen["citizen_id"]
-        ),
-    )
-
-
-async def citizenship_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    ensure_user(update.effective_user)
-
-    await update.message.reply_text(
-        citizenship_text(update.effective_user),
-        reply_markup=citizenship_keyboard(),
-    )
-
-
-async def terms_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Vellar — цифровое сообщество.\n\n"
-        "Гражданство и земельные участки в этом боте "
-        "являются цифровыми внутриигровыми/социальными активами "
-        "и не являются юридическим гражданством, "
-        "государственной регистрацией или правом собственности "
-        "на реальную землю."
-    )
-
-
-async def support_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🆘 Vellar Support\n\n"
-        "По вопросам гражданства, платежей и активов "
-        "обратитесь к администрации проекта."
-    )
-
-
-# ============================================================
+# =========================================================
 # MAIN
-# ============================================================
+# =========================================================
 
 def main():
+
     if not BOT_TOKEN:
         raise RuntimeError(
-            "BOT_TOKEN is not set. Add your Telegram bot token to environment variables."
+            "BOT_TOKEN не найден в переменных окружения."
         )
 
     init_db()
@@ -1128,45 +1200,61 @@ def main():
         .build()
     )
 
-    # Commands
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("citizenship", citizenship_command))
-    application.add_handler(CommandHandler("land", land_command))
-    application.add_handler(CommandHandler("assets", assets_command))
-    application.add_handler(CommandHandler("terms", terms_command))
-    application.add_handler(CommandHandler("support", support_command))
-    application.add_handler(CommandHandler("myid", myid))
-    application.add_handler(CommandHandler("test", test_menu))
-
-    # Normal buttons
     application.add_handler(
-        CallbackQueryHandler(
-            callbacks,
-            pattern=r"^(menu|citizenship|land|assets|terms|support|buy_citizenship|buy_land_[124])$",
-        )
+        CommandHandler("start", start)
     )
 
-    # Developer test buttons
+    application.add_handler(
+        CommandHandler("test", test_command)
+    )
+
     application.add_handler(
         CallbackQueryHandler(
             test_callbacks,
-            pattern=r"^test_",
+            pattern=r"^test_"
         )
     )
 
-    # Telegram Stars
     application.add_handler(
-        PreCheckoutQueryHandler(precheckout)
+        CallbackQueryHandler(
+            buy_citizenship,
+            pattern=r"^buy_citizenship$"
+        )
+    )
+
+    application.add_handler(
+        CallbackQueryHandler(
+            buy_land,
+            pattern=r"^buy_land_[124]$"
+        )
+    )
+
+    application.add_handler(
+        CallbackQueryHandler(
+            callbacks,
+            pattern=r"^(menu|citizenship|land|assets|terms|support)$"
+        )
+    )
+
+    application.add_handler(
+        PreCheckoutQueryHandler(
+            precheckout_callback
+        )
     )
 
     application.add_handler(
         MessageHandler(
             filters.SUCCESSFUL_PAYMENT,
-            successful_payment,
+            successful_payment
         )
     )
 
-    print("Vellar Citizen Bot is running...")
+    application.add_error_handler(
+        error_handler
+    )
+
+    print("Vellar bot started.")
+
     application.run_polling()
 
 
