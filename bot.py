@@ -27,7 +27,7 @@ from PIL import Image, ImageDraw, ImageFont
 # ============================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "1768107641"))
+ADMIN_ID = int(os.getenv("ADMIN_ID", "888972823"))
 
 CARD_TEMPLATE = Path("citizen_card_template.png")
 DB_PATH = Path("vellar.db")
